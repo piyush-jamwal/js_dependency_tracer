@@ -1,6 +1,6 @@
 {
   "name": "js-dependency-tracer",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "A tool to trace the dependency tree of a JavaScript or TypeScript file",
   "main": "src/index.js",
   "bin": {
