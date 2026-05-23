@@ -60,16 +60,11 @@ function resolveImportFile(fromDir, spec) {
   return null;
 }
 
-function parseFile(filePath, visited = new Set()) {
-  const absolutePath = path.resolve(filePath);
-
+function parseFileNode(absolutePath) {
   if (!fs.existsSync(absolutePath)) return null;
 
   const stat = fs.statSync(absolutePath);
   if (!stat.isFile()) return null;
-
-  if (visited.has(absolutePath)) return null;
-  visited.add(absolutePath);
 
   const buf = fs.readFileSync(absolutePath);
   if (looksBinary(buf)) {
@@ -78,10 +73,11 @@ function parseFile(filePath, visited = new Set()) {
       content: null,
       imports: [],
       skipped: "binary",
+      _rawImports: [],
     };
   }
-  // Read the file content and parse it
-  const code = buf.toString("utf8").replace(/^\uFEFF/, ""); // remove BOM if any
+
+  const code = buf.toString("utf8").replace(/^﻿/, "");
   let ast;
   try {
     ast = parseToAst(code, absolutePath);
@@ -93,53 +89,74 @@ function parseFile(filePath, visited = new Set()) {
       content: code,
       imports: [],
       parseError: e.message,
+      _rawImports: [],
     };
   }
 
-  const imports = [];
+  const rawImports = [];
   walkAST(ast, (node) => {
     if (node.type === "ImportDeclaration") {
-      imports.push(node.source.value);
+      rawImports.push(node.source.value);
     }
   });
 
-  // Build the current node with file content included
-  const node = {
+  return {
     file: absolutePath,
-    content: code, // Include the entire file content
+    content: code,
     imports: [],
+    _rawImports: rawImports,
   };
+}
 
-  // Recursively parse each imported file
-  for (const imp of imports) {
-    // Only trace relative imports
-    if (!imp.startsWith(".") && !imp.startsWith("/")) continue;
-    if (imp.endsWith(".json")) continue;
-    const fromDir = path.dirname(absolutePath);
-    const resolved = resolveImportFile(fromDir, imp);
-    try {
-      console.warn(
-        `[trace] from=${absolutePath} import=${imp} resolved=${
-          resolved || "null"
-        }`
-      );
-    } catch {}
-    if (!resolved) {
-      // try additional TS candidate: .d.ts
-      const base = path.resolve(fromDir, imp);
-      const dTs = `${base}.d.ts`;
-      if (fs.existsSync(dTs) && fs.statSync(dTs).isFile()) {
-        const childNodeDTs = parseFile(dTs, visited);
-        if (childNodeDTs) node.imports.push(childNodeDTs);
-      }
+function resolveImportTarget(fromDir, imp) {
+  const resolved = resolveImportFile(fromDir, imp);
+  if (resolved) return resolved;
+  const base = path.resolve(fromDir, imp);
+  const dTs = `${base}.d.ts`;
+  if (fs.existsSync(dTs) && fs.statSync(dTs).isFile()) return dTs;
+  return null;
+}
+
+function parseFile(entryFile, maxDepth = Infinity) {
+  const entryAbs = path.resolve(entryFile);
+  const visited = new Set();
+
+  const root = parseFileNode(entryAbs);
+  if (!root) return null;
+  visited.add(entryAbs);
+
+  const queue = [{ node: root, depth: 0 }];
+
+  while (queue.length > 0) {
+    const { node, depth } = queue.shift();
+
+    if (depth >= maxDepth) {
+      delete node._rawImports;
       continue;
     }
 
-    const childNode = parseFile(resolved, visited);
-    if (childNode) node.imports.push(childNode);
+    const fromDir = path.dirname(node.file);
+    for (const imp of node._rawImports) {
+      if (!imp.startsWith(".") && !imp.startsWith("/")) continue;
+      if (imp.endsWith(".json")) continue;
+
+      const resolved = resolveImportTarget(fromDir, imp);
+      if (!resolved) continue;
+
+      if (visited.has(resolved)) continue;
+      visited.add(resolved);
+
+      const childNode = parseFileNode(resolved);
+      if (!childNode) continue;
+
+      node.imports.push(childNode);
+      queue.push({ node: childNode, depth: depth + 1 });
+    }
+
+    delete node._rawImports;
   }
 
-  return node;
+  return root;
 }
 
 function walkAST(ast, callback) {
@@ -153,12 +170,6 @@ function walkAST(ast, callback) {
       }
     }
   }
-}
-
-const entryFile = process.argv[2];
-if (!entryFile) {
-  console.error("Please provide an entry file.");
-  process.exit(1);
 }
 
 module.exports = { parseFile };
